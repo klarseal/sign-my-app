@@ -123,7 +123,7 @@ Assert-True ($nativeDisplay.Count -eq 1 -and $nativeDisplay[0] -ceq (ConvertTo-S
 
 $releaseVersion = (Get-Content -Raw -LiteralPath (Join-Path $repo 'VERSION')).Trim()
 $readme = Get-Content -Raw -LiteralPath (Join-Path $repo 'README.md')
-$installTags = [regex]::Matches($readme, "git clone --branch '([^']+)' --depth 1")
+$installTags = [regex]::Matches($readme, "git -c advice.detachedHead=false clone --branch '([^']+)' --depth 1")
 Assert-True ($releaseVersion -cmatch '^v\d+\.\d+\.\d+$' -and $installTags.Count -gt 0 -and
     @($installTags | Where-Object { $_.Groups[1].Value -cne $releaseVersion }).Count -eq 0 -and
     $readme.Contains('git tag ((Get-Content -LiteralPath .\VERSION -Raw).Trim())')) 'F3: README install tag matches VERSION used by the release command'

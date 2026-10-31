@@ -14,7 +14,7 @@ Pick your agent and paste its three lines into Windows PowerShell. Each one down
 
 ```powershell
 $destination = Join-Path $env:USERPROFILE '.claude\skills\sign-my-app'
-git clone --branch 'v1.0.0' --depth 1 https://github.com/klarseal/sign-my-app $destination
+git -c advice.detachedHead=false clone --branch 'v1.0.0' --depth 1 https://github.com/klarseal/sign-my-app $destination
 if ($LASTEXITCODE -eq 0) { Remove-Item -LiteralPath (Join-Path $destination '.git') -Recurse -Force }
 ```
 
@@ -24,7 +24,7 @@ Start a fresh Claude Code session and say **"sign my app"**, or use `/sign-my-ap
 
 ```powershell
 $destination = Join-Path $env:USERPROFILE '.agents\skills\sign-my-app'
-git clone --branch 'v1.0.0' --depth 1 https://github.com/klarseal/sign-my-app $destination
+git -c advice.detachedHead=false clone --branch 'v1.0.0' --depth 1 https://github.com/klarseal/sign-my-app $destination
 if ($LASTEXITCODE -eq 0) { Remove-Item -LiteralPath (Join-Path $destination '.git') -Recurse -Force }
 ```
 
