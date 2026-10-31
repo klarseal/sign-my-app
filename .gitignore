@@ -1,0 +1,11 @@
+# Test leftovers and local files
+*.pfx
+*.cer
+*.pvk
+*.log
+*.tmp
+.test-*/
+test-output/
+*.bak
+.DS_Store
+Thumbs.db
