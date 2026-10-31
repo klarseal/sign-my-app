@@ -8,13 +8,13 @@ Install the skill, then tell your coding agent: **"sign my app"**.
 
 ## Install
 
-Pick your agent and paste its three lines into Windows PowerShell. Each one downloads the tagged release (`v1.0.0`, the value in `VERSION`) into your user skills folder, outside your app project.
+Pick your agent and paste its three lines into Windows PowerShell. Each one downloads the tagged release (`v1.0.1`, the value in `VERSION`) into your user skills folder, outside your app project.
 
 **Claude Code**
 
 ```powershell
 $destination = Join-Path $env:USERPROFILE '.claude\skills\sign-my-app'
-git -c advice.detachedHead=false clone --branch 'v1.0.0' --depth 1 https://github.com/klarseal/sign-my-app $destination
+git -c advice.detachedHead=false clone --branch 'v1.0.1' --depth 1 https://github.com/klarseal/sign-my-app $destination
 if ($LASTEXITCODE -eq 0) { Remove-Item -LiteralPath (Join-Path $destination '.git') -Recurse -Force }
 ```
 
@@ -24,7 +24,7 @@ Start a fresh Claude Code session and say **"sign my app"**, or use `/sign-my-ap
 
 ```powershell
 $destination = Join-Path $env:USERPROFILE '.agents\skills\sign-my-app'
-git -c advice.detachedHead=false clone --branch 'v1.0.0' --depth 1 https://github.com/klarseal/sign-my-app $destination
+git -c advice.detachedHead=false clone --branch 'v1.0.1' --depth 1 https://github.com/klarseal/sign-my-app $destination
 if ($LASTEXITCODE -eq 0) { Remove-Item -LiteralPath (Join-Path $destination '.git') -Recurse -Force }
 ```
 
