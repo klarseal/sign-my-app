@@ -29,7 +29,8 @@ $fixtureSafety = (Get-Content -Raw -LiteralPath $fixtureSafetyPath).
 $fixtureSafety += @'
 
 # TEST FIXTURE ONLY: scripted answers and offline signing with the test publisher.
-function Read-Host([string]$Prompt) {
+function Assert-SigningConsole {}
+function Read-SigningConfirmation([string]$Prompt) {
     $config = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'test-config.json') | ConvertFrom-Json
     if ($Prompt -like 'Type REPLACE *') { return $config.ReplaceAnswer }
     return $config.Answer
@@ -102,9 +103,28 @@ Assert-Throws { Invoke-TestApproval $app } 'R3: direct call refuses confirmation
 Assert-Throws { Invoke-ApprovedSigning -FilePath $app -ExpectedSHA256 $currentHash -ApprovePlan ('A'*64) -Thumbprint $thumb } 'R3: direct call refuses changed approval plan' 'changed after preview'
 Assert-True (-not (Test-Path -LiteralPath $env:SIGN_MY_APP_TEST_LOG)) 'R3: missing or wrong approval never starts SignTool'
 
-# A new Windows console (no redirected handles). The fixture supplies an answer;
-# the harmless native recorder proves execution was reached, not a real signing key.
+# A new classic console with production guards and CONIN$ input. The other
+# snapshot tests retain scripted answers; strip those overrides from this copy.
 Set-TestPlan $app 'record' $fakeTool
+$consoleFixture = Join-Path $testRoot 'native-console-fixture'
+New-Item -ItemType Directory -Path $consoleFixture | Out-Null
+Copy-Item -Path (Join-Path $fixture '*') -Destination $consoleFixture
+$consoleSafety = Get-Content -Raw -LiteralPath $fixtureSafetyPath
+$consoleTokens = $null; $consoleErrors = $null
+$consoleAst = [Management.Automation.Language.Parser]::ParseInput($consoleSafety, [ref]$consoleTokens, [ref]$consoleErrors)
+$consoleOverrides = @($consoleAst.FindAll({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in @('Assert-SigningConsole','Read-SigningConfirmation')
+}, $false) | Group-Object Name | ForEach-Object { $_.Group | Select-Object -Skip 1 })
+if ($consoleErrors.Count -or $consoleOverrides.Count -ne 2) { throw 'Expected exactly two console fixture overrides.' }
+foreach ($override in ($consoleOverrides | Sort-Object { $_.Extent.StartOffset } -Descending)) {
+    $consoleSafety = $consoleSafety.Remove($override.Extent.StartOffset, $override.Extent.EndOffset - $override.Extent.StartOffset)
+}
+[IO.File]::WriteAllText((Join-Path $consoleFixture 'Signing-Safety.ps1'), $consoleSafety)
+$ps = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
+if (-not $NonDesktop) {
+    . (Join-Path $repo 'mcp/tests/Desktop-Lock.ps1')
+    $desktopMutex = Enter-DesktopTestLock 'Commands'
+    try {
 $consoleResult = Join-Path $testRoot 'console-result.txt'
 $consoleScript = Join-Path $testRoot 'console-test.ps1'
 $consoleSource = @'
@@ -113,6 +133,12 @@ $ErrorActionPreference = 'Stop'
 try {
     if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) { throw 'Test requires a normal console.' }
     . (Join-Path $Fixture 'Signing-Safety.ps1')
+    Add-Type -Path __CONSOLE_TEST_SOURCE__
+    [Console]::Title = 'TEST ONLY - nothing will be signed'
+    Write-Host 'TEST ONLY - nothing will be signed'
+    [SigningConsoleTest]::Show()
+    Assert-SigningConsole
+    [SigningConsoleTest]::QueueText("SIGN $Plan")
     # These labels must have no bearing on console usability or approval.
     $env:AI_AGENT = 'regression-test'
     $env:CLAUDECODE = 'regression-test'
@@ -122,18 +148,23 @@ try {
     [IO.File]::WriteAllText($Result, 'normal console reached stubbed SignTool')
 } catch { [IO.File]::WriteAllText($Result, $_.ToString()); exit 1 }
 '@
+$consoleSource = $consoleSource.Replace('[SigningConsoleTest]::Show()', ('. ' + (ConvertTo-SigningPSLiteral (Join-Path $repo 'mcp/tests/Desktop-Lock.ps1')) + '; $windowMutex = Enter-DesktopTestLock; [SigningConsoleTest]::Show()'))
+$consoleSource = $consoleSource.Replace('__CONSOLE_TEST_SOURCE__', (ConvertTo-SigningPSLiteral (Join-Path $PSScriptRoot 'Console-Input.cs')))
 [IO.File]::WriteAllText($consoleScript, $consoleSource)
 $ps = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
-$consoleArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $consoleScript, $fixture, $app, $currentHash, $currentPlan, $thumb, $consoleResult)
+$consoleArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $consoleScript, $consoleFixture, $app, $currentHash, $currentPlan, $thumb, $consoleResult)
 $quotedConsoleArgs = ($consoleArgs | ForEach-Object { '"' + $_ + '"' }) -join ' '
-$console = Start-Process -FilePath $ps -ArgumentList $quotedConsoleArgs -WindowStyle Hidden -PassThru
+$console = Start-Process -FilePath ([IO.Path]::Combine([Environment]::SystemDirectory, 'conhost.exe')) -ArgumentList ('"' + $ps + '" ' + $quotedConsoleArgs) -WorkingDirectory ([Environment]::SystemDirectory) -WindowStyle Hidden -PassThru
 try {
     if (-not $console.WaitForExit(30000)) { $console.Kill(); throw 'Normal console test timed out.' }
     $consoleText = [IO.File]::ReadAllText($consoleResult)
     if ($console.ExitCode -ne 0) { throw "Normal console failed: $consoleText" }
-    Assert-True ($consoleText -eq 'normal console reached stubbed SignTool') 'R1: normal console reaches stubbed SignTool'
+    Assert-True ($consoleText -eq 'normal console reached stubbed SignTool') 'R1: classic console reaches stubbed SignTool through production guard and native CONIN$'
 } finally { $console.Dispose() }
 Remove-Item -LiteralPath $env:SIGN_MY_APP_TEST_LOG
+
+    } finally { Exit-DesktopTestLock $desktopMutex }
+} else { Write-Output 'SKIP: visible classic console regression (NonDesktop)' }
 
 Set-TestPlan $app 'fail'
 Assert-Throws { Invoke-TestApproval $app } 'R4: signing failure leaves original untouched' 'tool failed'

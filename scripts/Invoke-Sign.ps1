@@ -10,7 +10,8 @@ param(
     [ValidatePattern('^[A-Fa-f0-9]{40}$')][string]$Thumbprint,
     [string]$TimestampUrl = 'http://time.certum.pl',
     [switch]$MachineStore,
-    [switch]$Run
+    [switch]$Run,
+    [switch]$PassThruPlan
 )
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/Signing-Safety.ps1"
@@ -24,6 +25,8 @@ $certificate = Get-SigningCertificate $Thumbprint -MachineStore:$MachineStore
 $Thumbprint = $certificate.Thumbprint
 $tool = & "$PSScriptRoot/Find-SignTool.ps1"
 $hash = Get-SigningHash $file.FullName
+$contentStream = [IO.File]::Open($file.FullName, 'Open', 'Read', 'Read')
+try { $null = Get-SigningSnapshotDigest $file.FullName $contentStream } finally { $contentStream.Dispose() }
 $planHash = Get-SigningPlanHash @('1', $file.FullName, $hash, $tool, $Thumbprint, [string][bool]$MachineStore, $TimestampUrl)
 $arguments = @('sign', '/fd', 'SHA256', '/tr', $TimestampUrl, '/td', 'SHA256', '/sha1', $Thumbprint)
 if ($MachineStore) { $arguments += '/sm' }
@@ -37,6 +40,11 @@ Write-Output "Thumbprint: $(ConvertTo-SigningDisplayText $Thumbprint)"
 Write-Output "Timestamp service: $TimestampUrl"
 Write-Output "Plan SHA-256: $planHash"
 $previousPublisher = Get-ReplacedSigningPublisher $file.FullName $Thumbprint
+if ($PassThruPlan) {
+    if ($previousPublisher) { throw 'MCP keeps other publishers intact. Use the separate manual replacement workflow for owned files.' }
+    return [pscustomobject]@{ File = $file.FullName; SHA256 = $hash; Publisher = $certificate.Subject;
+        Thumbprint = $Thumbprint; TimestampUrl = $TimestampUrl; PlanHash = $planHash; MachineStore = [bool]$MachineStore }
+}
 if ($previousPublisher) {
     Write-Output "This file already carries another publisher's signature (untrusted certificate text): $(ConvertTo-SigningDisplayText $previousPublisher.Subject)"
     Write-Output "Existing publisher thumbprint: $(ConvertTo-SigningDisplayText $previousPublisher.Thumbprint)"

@@ -1,16 +1,28 @@
 ﻿#Requires -Version 5.1
 # Shared validation. Data from projects and certificate subjects is never executable text.
+# Both runtimes use generated Unicode category/default-ignorable ranges, including
+# supplementary planes. This avoids .NET Framework's older Unicode category table.
+$script:SigningInvisibleRanges = (Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'Unicode-Safety.json') | ConvertFrom-Json).ranges
 function Test-SigningControlText([string]$Value) {
     for ($i = 0; $i -lt $Value.Length; $i++) {
-        $category = [Globalization.CharUnicodeInfo]::GetUnicodeCategory($Value, $i)
-        if ($category -in @('Control', 'Format', 'LineSeparator', 'ParagraphSeparator')) { return $true }
-        if ([char]::IsHighSurrogate($Value[$i]) -and $i + 1 -lt $Value.Length -and [char]::IsLowSurrogate($Value[$i + 1])) { $i++ }
+        $point = [int]$Value[$i]
+        if ([char]::IsHighSurrogate($Value[$i]) -and $i + 1 -lt $Value.Length -and [char]::IsLowSurrogate($Value[$i + 1])) {
+            $point = [char]::ConvertToUtf32($Value, $i); $i++
+        }
+        $low = 0; $high = $script:SigningInvisibleRanges.Count - 1
+        while ($low -le $high) {
+            $mid = ($low + $high) -shr 1
+            $range = $script:SigningInvisibleRanges[$mid]
+            if ($point -lt $range[0]) { $high = $mid - 1 }
+            elseif ($point -gt $range[1]) { $low = $mid + 1 }
+            else { return $true }
+        }
     }
     return $false
 }
 function Assert-SafeSigningText([string]$Value) {
     if ((Test-SigningControlText $Value) -or $Value -match '[''"\u2018-\u201f`$;&|<>]') {
-        throw 'This name contains control characters, quotes or shell characters. Rename it before using a signing command.'
+        throw 'This name contains control, invisible or private-use characters, quotes or shell characters. Rename it before using a signing command.'
     }
 }
 function ConvertTo-SigningDisplayText([string]$Value) {
@@ -119,6 +131,32 @@ function Get-SigningCertificate([string]$Thumbprint, [switch]$MachineStore) {
     }
     return $cert
 }
+function Get-SigningSessionFailure([string]$Output, [string[]]$KnownPaths = @()) {
+    # Only classify a failed signing call, never verification or a successful call.
+    # Exact allowlist; see references/session-errors.md for names and messages.
+    $codes = '8009000D|80090013|80090016|80090017|80090019|8009001D|8009001E|80090022|8009002E|80090030|8010000C|80100017|8010001D|8010001E|8010002E|80100030|80100069|8010006E|8010006F'
+    $match = [regex]::Match($Output, '(?i)\b0x(' + $codes + ')\b')
+    if ($match.Success) { return '0x' + $match.Groups[1].Value.ToUpperInvariant() }
+    # A reported non-session HRESULT wins over incidental provider-like words.
+    if ($Output -match '(?i)\b0x[0-9a-f]{8}\b') { return }
+    foreach ($knownPath in ($KnownPaths | Sort-Object Length -Descending)) {
+        if ($knownPath) { $Output = [regex]::Replace($Output, [regex]::Escape($knownPath), '', 'IgnoreCase') }
+    }
+    $messages = @('Keyset does not exist', 'The keyset is not defined', 'Key does not exist',
+        'Invalid provider specified', 'Provider type not defined',
+        'Provider DLL failed to initialize correctly', 'Provider DLL could not be found',
+        'No smart card inserted', 'The smart card has been removed',
+        'The requested key container does not exist on the smart card',
+        'No smart card readers are available',
+        'The device that is required by this cryptographic provider is not ready for use',
+        'This operation requires input from the user',
+        'Provider could not perform the action since the context was acquired as silent',
+        'The user has not authenticated to the smart card')
+    foreach ($message in $messages) {
+        if ($Output.IndexOf($message, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $message }
+    }
+    if ($Output -match '(?i)\btoken (?:is )?(?:not present|not logged in|expired)\b|\bsession (?:has )?expired\b') { return 'token/session unavailable' }
+}
 function Invoke-SigningNative([string]$Tool, [string[]]$Arguments) {
     # ProcessStartInfo bypasses PS 5.1 native argument reserialization. Quote every Windows
     # argument; quotes are forbidden and trailing backslashes must be doubled before closing.
@@ -138,10 +176,47 @@ function Invoke-SigningNative([string]$Tool, [string[]]$Arguments) {
     try {
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
+        # Provider UI is allowed, but must never hold the operation indefinitely.
+        $waitMilliseconds = if ($Arguments[0] -eq 'sign') { 60000 } else { 45000 }
+        if (-not $process.WaitForExit($waitMilliseconds)) {
+            # Kill only this operation's process tree, not the signing app/session.
+            $killInfo = New-Object Diagnostics.ProcessStartInfo
+            $killInfo.FileName = [IO.Path]::Combine([Environment]::SystemDirectory, 'taskkill.exe')
+            $killInfo.Arguments = '/PID ' + $process.Id + ' /T /F'
+            $killInfo.UseShellExecute = $false; $killInfo.CreateNoWindow = $true
+            $killInfo.RedirectStandardOutput = $true; $killInfo.RedirectStandardError = $true
+            $killer = [Diagnostics.Process]::Start($killInfo)
+            try { if (-not $killer.WaitForExit(5000)) { $killer.Kill() } } finally { $killer.Dispose() }
+            if (-not $process.HasExited) { $process.Kill() }
+            $null = $process.WaitForExit(5000)
+            if ($Arguments[0] -eq 'sign') { throw 'KLARSEAL_SESSION_REQUIRED: provider-wait-timeout' }
+            throw 'Verification time limit reached.'
+        }
+        if (-not $stdout.Wait(5000) -or -not $stderr.Wait(5000)) {
+            if ($Arguments[0] -eq 'sign') { throw 'KLARSEAL_SESSION_REQUIRED: provider-output-timeout' }
+            throw 'Verification output time limit reached.'
+        }
         $output = $stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()
-        if ($output) { Write-Host (ConvertTo-SigningDisplayText $output) }
-        if ($process.ExitCode -ne 0) { throw "Signing failed or warned (exit $($process.ExitCode)). Inspect the file before retrying; do not release it." }
+        if ($process.ExitCode -ne 0 -and $Arguments[0] -eq 'sign') {
+            $knownPaths = @($Tool, (Split-Path -Parent $Tool))
+            foreach ($argument in $Arguments) {
+                if ([IO.Path]::IsPathRooted($argument)) { $knownPaths += $argument; $knownPaths += Split-Path -Parent $argument }
+            }
+            $sessionFailure = Get-SigningSessionFailure $output $knownPaths
+            # Do not display alarming provider diagnostics as the session result.
+            if ($sessionFailure) { throw ('KLARSEAL_SESSION_REQUIRED: ' + $sessionFailure) }
+        }
+        if ($output) {
+            if ($Arguments[0] -eq 'verify') {
+                # Preserve bounded verbose chain/timestamp lines for verification.
+                # Every native line is still untrusted data, escaped individually.
+                if ($output.Length -gt 65536) { throw 'Verification output limit reached.' }
+                foreach ($line in ($output -split '\r?\n')) { Write-Host (ConvertTo-SigningDisplayText $line) }
+            } else { Write-Host (ConvertTo-SigningDisplayText $output) }
+        }
+        if ($process.ExitCode -ne 0) {
+            throw "Signing failed or warned (exit $($process.ExitCode)). Inspect the file before retrying; do not release it."
+        }
     } finally { $process.Dispose() }
 }
 function Assert-SigningApproval([string]$FilePath, [string]$ExpectedSHA256, [string]$ApprovePlan,
@@ -153,51 +228,7 @@ function Assert-SigningApproval([string]$FilePath, [string]$ExpectedSHA256, [str
         throw 'The file or signing plan changed after preview. Nothing signed. Preview it again.'
     }
 }
-function Initialize-AuthenticodeDigest {
-    if (-not ('SignMyApp.AuthenticodeDigest' -as [type])) {
-        Add-Type -AssemblyName System.Security
-        Add-Type -Path (Join-Path $PSScriptRoot 'Authenticode-Digest.cs') -ReferencedAssemblies ([Security.Cryptography.Pkcs.SignedCms].Assembly.Location)
-    }
-}
-function Get-AuthenticodeContentDigest([string]$Path, [IO.FileStream]$LockedFile) {
-    Initialize-AuthenticodeDigest
-    return [SignMyApp.AuthenticodeDigest]::Compute($Path, $LockedFile)
-}
-function Get-SigningSnapshotDigest([string]$Path, [IO.FileStream]$LockedFile,
-    [string]$Thumbprint, [string]$ExpectedDigest) {
-    $copyPath = $null
-    $copyStream = $null
-    try {
-        $checkPath = $Path
-        $checkStream = $LockedFile
-        if ([IO.Path]::GetExtension($Path) -eq '.msi') {
-            # The MSI SIP needs writable sharing and can rewrite compound storage
-            # even when calculating a digest. Give it a disposable byte-for-byte
-            # copy, while keeping the actual snapshot write/rename locked.
-            $copyPath = Join-Path ([IO.Path]::GetDirectoryName($Path)) ('digest-' + [guid]::NewGuid().ToString('N') + '.msi')
-            $writer = [IO.File]::Open($copyPath, 'CreateNew', 'Write', 'None')
-            try { $LockedFile.Position = 0; $LockedFile.CopyTo($writer) } finally { $writer.Dispose() }
-            $copyStream = [IO.File]::Open($copyPath, 'Open', 'Read', 'ReadWrite')
-            $checkPath = $copyPath
-            $checkStream = $copyStream
-        }
-        Initialize-AuthenticodeDigest
-        # Verify the untouched signed copy before Compute can rewrite MSI metadata.
-        if ($ExpectedDigest) {
-            [SignMyApp.AuthenticodeDigest]::Verify($checkPath, $checkStream, $Thumbprint, $ExpectedDigest)
-        }
-        $digest = Get-AuthenticodeContentDigest $checkPath $checkStream
-        if ($ExpectedDigest) {
-            if ($digest -ne $ExpectedDigest) {
-                throw 'Signed snapshot Authenticode digest does not match the approved bytes. Original untouched.'
-            }
-        }
-        return $digest
-    } finally {
-        if ($copyStream) { $copyStream.Dispose() }
-        if ($copyPath -and (Test-Path -LiteralPath $copyPath)) { Remove-Item -LiteralPath $copyPath -Force }
-    }
-}
+. (Join-Path $PSScriptRoot 'Authenticode-Content.ps1')
 function Get-SigningHelperCommand([string]$Name) {
     if ($Name -notin @('Find-SignTool.ps1', 'Test-SigningSetup.ps1', 'Invoke-Sign.ps1', 'Confirm-Sign.ps1', 'Test-Signature.ps1')) {
         throw 'Unknown signing helper.'
@@ -210,15 +241,78 @@ function Get-SigningHelperCommand([string]$Name) {
     return '& "' + $powershell + '" -NoProfile -ExecutionPolicy Bypass -File "' + $path + '"'
 }
 function Get-ReplacedSigningPublisher([string]$Path, [string]$Thumbprint) {
+    Write-SigningNetworkNotice
     $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($signature.Status -eq 'HashMismatch') { throw 'Windows reports a corrupt signed file (HashMismatch). Nothing signed.' }
     if ($signature.SignerCertificate -and $signature.SignerCertificate.Thumbprint -ne $Thumbprint) {
         return $signature.SignerCertificate
     }
 }
+function Write-SigningNetworkNotice {
+    # Information stream keeps the publisher return value separate from notices.
+    Write-Host "Network notice: Windows may contact addresses in the file's certificate (AIA, CRL and OCSP), including local or private addresses, while checking signatures. Only check files you trust to trigger these requests."
+}
+function Remove-StaleSigningStage([string]$Path, [string]$Parent) {
+    # Only an exact direct child, owned by us with our private ACL and contents.
+    # Never recursively delete: links, subfolders and unexpected files preserve it.
+    $cleanup = [IO.Path]::GetFullPath($Path)
+    if ([IO.Path]::GetDirectoryName($cleanup) -ne [IO.Path]::GetFullPath($Parent) -or
+        [IO.Path]::GetFileName($cleanup) -cnotmatch '^sign-my-app-approved-[a-f0-9]{32}$') { return }
+    $lease = $null
+    try {
+        $stage = Resolve-LocalSigningFile $cleanup
+        if (-not $stage.PSIsContainer) { return }
+        $acl = Get-Acl -LiteralPath $cleanup
+        $owner = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        if (-not $acl.AreAccessRulesProtected -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $owner) { return }
+        foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+            if ($rule.IdentityReference.Value -notin @($owner, 'S-1-5-18')) { return }
+        }
+        $children = @(Get-ChildItem -LiteralPath $cleanup -Force)
+        foreach ($child in $children) {
+            if ($child.PSIsContainer -or ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                $child.Name -cnotmatch '^(approved\.(exe|dll|msi)|stage\.lock)$') { return }
+        }
+        $lockPath = Join-Path $cleanup 'stage.lock'
+        # Pre-lease versions need an age margin. New orphaned leases can be
+        # collected at the next run immediately, without touching active stages.
+        if (-not (Test-Path -LiteralPath $lockPath) -and $stage.LastWriteTimeUtc -gt [DateTime]::UtcNow.AddMinutes(-10)) { return }
+        # Active operations hold this lease without sharing; taskkill releases it.
+        $lease = [IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
+        foreach ($child in $children) { if ($child.Name -ne 'stage.lock') { [IO.File]::Delete($child.FullName) } }
+        $lease.Dispose(); $lease = $null
+        [IO.File]::Delete($lockPath)
+        [IO.Directory]::Delete($cleanup, $false)
+    } catch {
+        # Busy, changed or inaccessible directories stay excluded from discovery.
+    } finally { if ($lease) { $lease.Dispose() } }
+}
+function Assert-SigningConsole {
+    $message = 'Please run the confirmation command in your own Windows PowerShell window. Redirected input or a missing interactive console cannot confirm signing. Nothing signed.'
+    try {
+        if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected -or [Console]::IsOutputRedirected -or $Host.Name -ne 'ConsoleHost') { throw $message }
+        foreach ($argument in [Environment]::GetCommandLineArgs()) {
+            if ($argument -match '^[-/]NonI' -and 'NonInteractive'.StartsWith($argument.Substring(1), [StringComparison]::OrdinalIgnoreCase)) { throw $message }
+        }
+        # RawUI probes the actual console handle; no window visibility/class test.
+        if (-not $Host.UI.RawUI -or $Host.UI.RawUI.BufferSize.Width -le 0) { throw $message }
+        $null = $Host.UI.RawUI.KeyAvailable
+        return
+    } catch {}
+    try { Write-Host $message -InformationAction Continue } catch {}
+    throw $message
+}
+function Read-SigningConfirmation([string]$Prompt) {
+    Assert-SigningConsole
+    # ConsoleHost reads the terminal, not a caller-supplied Console.SetIn reader.
+    $Host.UI.Write($Prompt + ': ')
+    return $Host.UI.ReadLine()
+}
 function Invoke-ApprovedSigning {
     [CmdletBinding()]
     param([string]$FilePath, [string]$ExpectedSHA256, [string]$ApprovePlan,
-        [string]$Thumbprint, [string]$TimestampUrl = 'http://time.certum.pl', [switch]$MachineStore)
+        [string]$Thumbprint, [string]$TimestampUrl = 'http://time.certum.pl', [switch]$MachineStore,
+        [scriptblock]$RequestApproval, [scriptblock]$OnSigningStarted)
     # These checks belong to the operation itself, including when called directly.
     # They prevent mistakes; they cannot establish who controls this process.
     if ($ExpectedSHA256 -notmatch '^[A-Fa-f0-9]{64}$' -or $ApprovePlan -notmatch '^[A-Fa-f0-9]{64}$') {
@@ -230,6 +324,9 @@ function Invoke-ApprovedSigning {
     $cert = Get-SigningCertificate $Thumbprint -MachineStore:$MachineStore
     $tool = & "$PSScriptRoot/Find-SignTool.ps1"
     Assert-SigningApproval $original.FullName $ExpectedSHA256 $ApprovePlan $tool $cert.Thumbprint ([bool]$MachineStore) $TimestampUrl
+    if (-not $RequestApproval) { Assert-SigningConsole }
+    $contentStream = [IO.File]::Open($original.FullName, 'Open', 'Read', 'Read')
+    try { $null = Get-SigningSnapshotDigest $original.FullName $contentStream } finally { $contentStream.Dispose() }
     Write-Host "File: $(ConvertTo-SigningDisplayText $original.FullName)"
     Write-Host "SHA-256: $ExpectedSHA256"
     Write-Host "Publisher (untrusted certificate text): $(ConvertTo-SigningDisplayText $cert.Subject)"
@@ -238,14 +335,15 @@ function Invoke-ApprovedSigning {
     Write-Host "Plan SHA-256: $ApprovePlan"
     $previousPublisher = Get-ReplacedSigningPublisher $original.FullName $cert.Thumbprint
     if ($previousPublisher) {
+        if ($RequestApproval) { throw 'MCP refuses to replace another publisher. Nothing signed.' }
         Write-Host "This file already carries another publisher's signature (untrusted certificate text): $(ConvertTo-SigningDisplayText $previousPublisher.Subject)"
         Write-Host "Existing publisher thumbprint: $(ConvertTo-SigningDisplayText $previousPublisher.Thumbprint)"
-        $replaceAnswer = Read-Host "Type REPLACE $(ConvertTo-SigningDisplayText $previousPublisher.Thumbprint) to allow replacing that signature"
+        $replaceAnswer = Read-SigningConfirmation "Type REPLACE $(ConvertTo-SigningDisplayText $previousPublisher.Thumbprint) to allow replacing that signature"
         if ($replaceAnswer -cne "REPLACE $($previousPublisher.Thumbprint)") {
             throw 'Replacement confirmation did not match the existing publisher. Nothing signed.'
         }
     }
-    $answer = Read-Host "Type SIGN $ApprovePlan to confirm this plan"
+    $answer = if ($RequestApproval) { & $RequestApproval $ApprovePlan } else { Read-SigningConfirmation "Type SIGN $ApprovePlan to confirm this plan" }
     if ($answer -cne "SIGN $ApprovePlan") { throw 'Typed confirmation did not match the plan hash. Nothing signed.' }
     # Resolve and bind the SDK tool again after the prompt, before any execution.
     $tool = & "$PSScriptRoot/Find-SignTool.ps1"
@@ -255,6 +353,7 @@ function Invoke-ApprovedSigning {
     $stageDir = $null
     $lockedSnapshot = $null
     $lockedOriginal = $null
+    $stageLease = $null
     try {
         # A private, same-volume snapshot limits other identities' access. SignTool
         # must write it, so no write-denying handle can span signing. Same-account
@@ -271,6 +370,7 @@ function Invoke-ApprovedSigning {
         }
         # Set the protected ACL at creation, rather than after exposing the directory.
         [IO.Directory]::CreateDirectory($stageDir, $security) | Out-Null
+        $stageLease = [IO.File]::Open((Join-Path $stageDir 'stage.lock'), 'CreateNew', 'ReadWrite', 'None')
         $snapshot = Join-Path $stageDir ('approved' + $original.Extension)
         # Copy bytes through a newly created file so a broad source-file ACL is
         # never copied into the private directory (CopyFile can preserve it).
@@ -288,11 +388,13 @@ function Invoke-ApprovedSigning {
         $approvedDigest = Get-SigningSnapshotDigest $snapshot $lockedSnapshot
         if ((Get-SigningHash $snapshot) -ne $ExpectedSHA256) { throw 'The snapshot changed during digest calculation. Original untouched.' }
         $lockedSnapshot.Dispose(); $lockedSnapshot = $null
+        $script:signingAttempted = $true
+        if ($OnSigningStarted) { & $OnSigningStarted }
         Invoke-SigningNative $tool ($arguments + @($snapshot))
         # Deny writes and renames throughout verification.
         $lockedSnapshot = [IO.File]::Open($snapshot, 'Open', 'Read', 'Read')
         $signedHash = Get-SigningHash $snapshot
-        $null = Get-SigningSnapshotDigest $snapshot $lockedSnapshot $cert.Thumbprint $approvedDigest
+        $comparison = Get-SigningSnapshotDigest $snapshot $lockedSnapshot $cert.Thumbprint $approvedDigest
         if ((Get-SigningHash $snapshot) -ne $signedHash) { throw 'The signed snapshot changed during verification. Original untouched.' }
         $null = Resolve-LocalSigningFile $original.FullName
         $lockedOriginal = [IO.File]::Open($original.FullName, 'Open', 'Read', 'Read')
@@ -303,10 +405,13 @@ function Invoke-ApprovedSigning {
         $lockedOriginal.Dispose(); $lockedOriginal = $null
         $lockedSnapshot.Dispose(); $lockedSnapshot = $null
         # Same volume, atomic replacement; never copy partial signed bytes over the original.
-        [SignMyApp.AuthenticodeDigest]::Replace($snapshot, $original.FullName)
+        [IO.File]::Replace($snapshot, $original.FullName, [NullString]::Value)
+        if ($comparison -eq 'content-comparison: not possible') { Write-Host 'content-comparison: not possible; signing used SignTool and Windows verification with the exact publisher.' }
+        [pscustomobject]@{ ContentComparison = $(if ($comparison -eq 'content-comparison: not possible') { 'not possible' } else { 'matched' }) }
     } finally {
         if ($lockedOriginal) { $lockedOriginal.Dispose() }
         if ($lockedSnapshot) { $lockedSnapshot.Dispose() }
+        if ($stageLease) { $stageLease.Dispose() }
         if ($stageDir) {
             $cleanup = [IO.Path]::GetFullPath($stageDir)
             if ([IO.Path]::GetDirectoryName($cleanup) -ne $original.DirectoryName -or

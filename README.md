@@ -1,64 +1,83 @@
 # Sign my app
 
-A free skill that lets your coding agent walk you through signing your Windows app, step by step.
+Sign your Windows app without leaving the conversation with your coding agent.
 
 You've built something. Signing puts your verified business name on it and lets Windows check that the file hasn't changed since you signed it. We think unsigned programs aren't professional, and we'd like your first signed release to feel easy.
 
-Install the skill, then tell your coding agent: **"sign my app"**.
+One free plugin for Claude Code and Codex holds both parts: a signing skill and a
+small [local MCP server](mcp/README.md) that runs on your own Windows PC. Install
+it, then tell your coding agent: **"sign my app"**.
 
 ## Install
 
-Pick your agent and paste its three lines into Windows PowerShell. Each one downloads the tagged release (`v1.0.1`, the value in `VERSION`) into your user skills folder, outside your app project.
+Tell Claude Code or Codex:
+
+> **Install the Klarseal MCP v1.1.0 from github.com/klarseal/sign-my-app.**
+
+Your agent follows [the install guide](mcp/INSTALL-FOR-AGENTS.md). It checks
+Windows, Git and Node 20+, installs the plugin outside your app project, and asks
+you one question: which build output folder may be signed. Existing folders are
+never replaced. Then start a new session (in a Claude Code terminal,
+`/reload-plugins` is enough) and say **"sign my app"**.
+
+Prefer to type the commands yourself?
 
 **Claude Code**
 
-```powershell
-$destination = Join-Path $env:USERPROFILE '.claude\skills\sign-my-app'
-git -c advice.detachedHead=false clone --branch 'v1.0.1' --depth 1 https://github.com/klarseal/sign-my-app $destination
-if ($LASTEXITCODE -eq 0) { Remove-Item -LiteralPath (Join-Path $destination '.git') -Recurse -Force }
+```text
+claude plugin marketplace add klarseal/sign-my-app#v1.1.0
+claude plugin install sign-my-app@klarseal
 ```
-
-Start a fresh Claude Code session and say **"sign my app"**, or use `/sign-my-app`.
 
 **Codex**
 
-```powershell
-$destination = Join-Path $env:USERPROFILE '.agents\skills\sign-my-app'
-git -c advice.detachedHead=false clone --branch 'v1.0.1' --depth 1 https://github.com/klarseal/sign-my-app $destination
-if ($LASTEXITCODE -eq 0) { Remove-Item -LiteralPath (Join-Path $destination '.git') -Recurse -Force }
+```text
+codex plugin marketplace add klarseal/sign-my-app --ref v1.1.0
+codex plugin add sign-my-app@klarseal
 ```
 
-Start a fresh Codex session and say **"sign my app"**. The user-level skill path is
-documented in [OpenAI's skill documentation](https://learn.chatgpt.com/docs/build-skills).
-
-**Other coding agents**
-
-Clone the same tag into a user tools folder outside your app project, remove its
-`.git` folder, and point your agent's user-level instructions at its absolute
-`AGENTS.md` path.
-
-If the folder already exists, `git clone` stops without changing it. Look at what's
-there before you replace it.
+`#v1.1.0` and `--ref v1.1.0` pin the release. A fresh plugin signs nothing until
+you choose your build output folder; ask your agent to finish setup with the
+install guide. No npm install, account, hooks or permission-mode changes.
 
 ## What it looks like
 
 > **You:** sign my app
 >
-> **Agent:** I found `bin\Release\MyApp.exe`. Your certificate shows the publisher **Your Company Ltd**. Here's the plan: the file, its SHA-256 hash, the publisher, the signing command and the timestamp service. When it looks right, copy the command below into your own PowerShell window and type the confirmation it asks for.
+> **Agent:** I found `bin\Release\MyApp.exe`. Your certificate shows the publisher **Your Company Ltd**. A Sign window shows the file, its SHA-256 hash, the publisher and the timestamp service. Check them and choose Sign once when it looks right.
 >
-> **You:** Done.
+> **You:** [clicks Sign once]
 >
 > **Agent:** Your app is signed and timestamped. Windows confirms the publisher is Your Company Ltd and that the file hasn't changed since you signed it.
 
 If you ship an installer, the agent helps you sign your app files first, rebuild the
 installer with them, then sign the installer.
 
+## Where it has been seen working
+
+- **Claude desktop app (Code tab):** in a real signing run, a separate Sign window
+  opened. One click signed the file, and the MCP verified and timestamped it.
+- **Claude Code in a terminal, and Codex:** you should see an approval card in the
+  chat or the same Sign window. We haven't seen this in a real signing run yet.
+  If something looks different, please open an issue.
+
 ## What it never does
 
-- **It never signs for you.** The agent prepares and shows you everything. You run the final command yourself, in your own terminal.
+- **Only you approve.** Nothing is signed until you choose Sign once, or until you have chosen **Always for this project** for that exact folder and certificate. Never set up automatic answers. Without the MCP, you run the final command yourself.
 - **It never sees your password.** Passwords, phone codes, tokens and private keys stay with you. You sign in to your signing app yourself.
 - It never orders a certificate, opens an account or completes an identity check for you.
 - It has no account of its own, sends no telemetry and does not call Klarseal services.
+- It compiles no code while running and installs no packages.
+
+## How to undo
+
+- **Always for this project:** say **"Forget signing trust for this project"**, or
+  delete `%LOCALAPPDATA%\Klarseal\SignMyApp\project-trust.json` to forget every project.
+- **The plugin:** `claude plugin uninstall sign-my-app@klarseal` or
+  `codex plugin remove sign-my-app@klarseal`. If your agent cloned the release,
+  also delete `.claude\skills\sign-my-app` or `.agents\skills\sign-my-app` in your
+  user folder; Claude Code otherwise keeps loading it.
+- **The local signing log:** delete `%LOCALAPPDATA%\Klarseal\SignMyApp`.
 
 ## Need a certificate?
 
@@ -89,15 +108,17 @@ Already have a code signing certificate? You can use it if Windows SignTool can 
 - A Windows PC with Windows PowerShell 5.1 or later.
 - Microsoft SignTool, included in the [Windows SDK](https://learn.microsoft.com/en-us/windows/apps/windows-sdk/downloads) (choose **Windows SDK Signing Tools for Desktop Apps**).
 - Your code signing certificate set up on that PC. If you use SimplySign, you'll also need its desktop and mobile apps.
-- A coding agent that can read the installed instructions.
-- [Git](https://git-scm.com/), to download the skill.
+- Claude Code or Codex, with [Node.js](https://nodejs.org/) 20 or later for the local MCP.
+  Other coding agents can follow the skill's [`AGENTS.md`](AGENTS.md) without the MCP.
+- [Git](https://git-scm.com/), to download it.
 
 ## How it works
 
 The agent finds your built `.exe`, `.dll` and `.msi` files and checks SignTool and
 your certificate. Before anything is signed, it shows you the exact files, SHA-256
-hashes, publisher name, signing command and timestamp service. You review them and
-run the printed approval command yourself, outside the agent.
+hashes, publisher name and timestamp service. With the MCP, you approve in its Sign
+window or approval card, and it signs and verifies in the same conversation.
+Without the MCP, run the printed approval command yourself, outside the agent.
 
 The signing command requests a timestamp, which records that the signature existed
 at that time. The agent then checks the signature and timestamp and explains the
@@ -157,8 +178,9 @@ certificate with `/sha1` and prints a `Confirm-Sign.ps1` command containing the 
 SHA-256 and plan hash. Review it, then run that exact command yourself in Windows
 PowerShell outside your coding agent. Type `SIGN <plan hash>` at its prompt, using
 the full displayed plan hash. The helper checks that the file and plan still match.
-The signing function itself requires both the plan and that typed confirmation,
-including if called directly.
+Manual signing calls require both the plan and that typed confirmation. The
+installed MCP bridge instead supplies its internal plan confirmation after your
+form or native-window answer; no tool argument can skip that approval.
 
 Check the signature:
 
@@ -169,17 +191,23 @@ Check the signature:
 Replace the example path with the full path to your built app.
 
 The confirmation command changes that file and contacts the displayed timestamp
-service. Signature verification may contact Windows certificate services.
+service. Signature verification may follow certificate-controlled AIA, CRL and
+OCSP URLs, including local or private addresses. Verify only files you trust to
+trigger those requests. The helper prints this notice before checking the file;
+normal Windows chain and revocation checks remain enabled.
 
 ## Security details
 
 Typing is a check against mistakes and a misled agent following this skill.
-A script running under the same account can pipe `SIGN <plan hash>` into the
-command; typing does not prove a person is present. Using the installed skill's
+Redirected stdin and hosts without an interactive console are refused. Both
+confirmations read directly from the console in your own Windows PowerShell
+window. This blocks ordinary piped answers, but console automation, modified
+helpers and same-account malicious code remain possible; typing does not prove
+a person is present. Using the installed skill's
 absolute helper paths keeps the app repository from choosing what runs.
-The agent prepares and previews; the
+For the manual path, the agent prepares and previews; the
 person must run the printed command in their own terminal. Agents **must not** run
-that command, call signing directly, or type the confirmation.
+that command, call signing directly outside the MCP approval flow, or type the confirmation.
 `Invoke-Sign.ps1 -Run` is refused. Process ancestry and agent names do not prove
 a person is at the keyboard and are not used as approval checks.
 
@@ -225,23 +253,29 @@ Rename those files first. Timestamp URLs must use HTTP(S) and a public host,
 without spaces, quotes or credentials.
 
 Certificate and file metadata displays escape Unicode control, format and line
-separator characters visibly and stop at 512 characters. Backslashes are doubled
+separator characters, nonstandard spaces, braille blank and private-use characters
+visibly and stop at 512 characters. Such characters are refused in file paths;
+ordinary spaces remain supported. Backslashes are doubled
 in these displays. Native-tool output follows the same rule. Printed executable
 commands retain the exact validated paths and arguments for review and execution.
 
 ## Testing
 
-This release was tested end to end with a real issued code signing certificate.
+v1.1.0 signed a real app with an issued certificate in the Claude desktop app, as
+described above. Earlier releases were tested end to end with an issued certificate
+through the printed command.
 
-The automated suite in `tests/` uses a temporary self-signed certificate that it
-creates and removes itself. See the [test record](tests/README.md) for what it
-covers and its limits.
+The automated suites in `tests/` and `mcp/tests/` use temporary self-signed
+certificates that they create and remove themselves. See the
+[skill test notes](tests/README.md), the [MCP test notes](mcp/tests/README.md) and
+the [client record](mcp/tests/client-results.md) for what they cover and their limits.
 
 ## Releases
 
 The release tag is the value stored in `VERSION`, created with
 `git tag ((Get-Content -LiteralPath .\VERSION -Raw).Trim())`. Tests reject README
 install tags that differ from `VERSION`. Install a tag, not a moving branch.
+What changed in each release: [CHANGELOG.md](CHANGELOG.md).
 
 Released under the [MIT licence](LICENSE). Provided AS IS, without warranty of any kind.
 

@@ -1,7 +1,8 @@
 ﻿#Requires -Version 5.1
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$FilePath
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [switch]$RequireTimestamp
 )
 
 $ErrorActionPreference = 'Stop'
@@ -9,7 +10,7 @@ $ErrorActionPreference = 'Stop'
 $file = Resolve-LocalSigningFile $FilePath -BaseDirectory (Split-Path -Parent $PSScriptRoot)
 if ($file.PSIsContainer) { throw 'Choose a file to verify.' }
 $tool = & "$PSScriptRoot/Find-SignTool.ps1"
-Invoke-SigningNative $tool @('verify', '/pa', '/v', $file.FullName)
+Write-SigningNetworkNotice
 $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
 if ($signature.SignerCertificate) {
     Write-Output "Publisher: $(ConvertTo-SigningDisplayText $signature.SignerCertificate.Subject)"
@@ -19,4 +20,10 @@ if ($signature.TimeStamperCertificate) {
     Write-Output 'The timestamp certificate is present; inspect its date with Windows signature details.'
 } else { Write-Output 'Timestamp: absent. Do not call this a timestamped release.' }
 Write-Output "Authenticode status: $(ConvertTo-SigningDisplayText $signature.Status)"
+$verifyArguments = @('verify', '/pa', '/v')
+if ($RequireTimestamp) {
+    if (-not $signature.TimeStamperCertificate) { throw 'Timestamp missing. Do not release.' }
+    $verifyArguments += '/tw'
+}
+Invoke-SigningNative $tool ($verifyArguments + @($file.FullName))
 Write-Output 'Verification passed: Windows accepted the publisher signature and file integrity under Authenticode policy on this machine.'

@@ -1,6 +1,6 @@
 ﻿#Requires -Version 5.1
 [CmdletBinding()]
-param([switch]$FailAfterCertificateCopy)
+param([switch]$FailAfterCertificateCopy, [switch]$NonDesktop)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $scripts = Join-Path $repo 'scripts'
@@ -49,8 +49,8 @@ try {
     'class App { static void Main() { } }' | Set-Content -LiteralPath $appSource -Encoding UTF8
     & $compiler /nologo /target:exe "/out:$app" $appSource
     if ($LASTEXITCODE -ne 0) { throw 'Test executable compilation failed.' }
-    $subject = 'CN=sign-my-app disposable test ' + [guid]::NewGuid().ToString('N')
-    $certificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject $subject -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy NonExportable -NotAfter (Get-Date).AddDays(1) -HashAlgorithm SHA256
+    $certificate = New-DisposableSigningCertificate
+    $subject = $certificate.Subject
     $thumb = $certificate.Thumbprint
     Write-Output "TEST CERTIFICATE: $thumb Subject=$subject"
     # Reproduce chain building's cached CA copy without trusting the certificate.
@@ -62,7 +62,7 @@ try {
     $fixture = Join-Path $testRoot 'fixture'
     New-Item -ItemType Directory -Path $fixture | Out-Null
     Copy-Item -Path (Join-Path $scripts '*.ps1') -Destination $fixture
-    Copy-Item -LiteralPath (Join-Path $scripts 'Authenticode-Digest.cs') -Destination $fixture
+    Copy-Item -LiteralPath (Join-Path $scripts 'Unicode-Safety.json') -Destination $fixture
     ('param(); return ' + (ConvertTo-SigningPSLiteral $fakeTool)) | Set-Content -LiteralPath (Join-Path $fixture 'Find-SignTool.ps1') -Encoding UTF8
     $hashBefore = Get-SigningHash $app
     $preview = & "$fixture/Invoke-Sign.ps1" -FilePath $app -Thumbprint $thumb
@@ -101,9 +101,10 @@ try {
     $ast = [System.Management.Automation.Language.Parser]::ParseInput($command, [ref]$tokens, [ref]$errorsForCommand)
     Assert-True ($errorsForCommand.Count -eq 0 -and $ast.EndBlock.Statements.Count -eq 1) 'H7: printed command parses as exactly one PowerShell statement'
     $readme = Get-Content -Raw -LiteralPath "$repo/README.md"
-    Assert-True ($readme.Contains("'.claude\skills\sign-my-app'") -and $readme.Contains("'.agents\skills\sign-my-app'")) 'H8: user-level installations for Claude and Codex'
+    $installGuide = Get-Content -Raw -LiteralPath "$repo/mcp/INSTALL-FOR-AGENTS.md"
+    Assert-True ($readme.Contains('mcp/INSTALL-FOR-AGENTS.md') -and $installGuide.Contains('.claude\skills\sign-my-app') -and $installGuide.Contains('.agents\skills\sign-my-app')) 'H8: user-level installations for Claude and Codex'
     $releaseVersion = (Get-Content -Raw -LiteralPath (Join-Path $repo 'VERSION')).Trim()
-    Assert-True ($readme.Contains("--branch '$releaseVersion' --depth 1") -and $readme.Contains("(Join-Path `$destination '.git')")) 'H8: tag-pinned clone and copied git metadata removed'
+    Assert-True ($installGuide.Contains("--branch '$releaseVersion' --depth 1") -and $installGuide.Contains('verify it is inside that') -and $installGuide.Contains('remove only that `.git` directory')) 'H8: tag-pinned clone and copied git metadata removed'
     foreach ($path in @('\\nonexistent.invalid\share\app.exe', '//nonexistent.invalid/share/app.exe', '\\?\C:\app.exe', '\\.\C:\app.exe', 'C:\app.exe:stream')) {
         Assert-Throws { & "$fixture/Invoke-Sign.ps1" -FilePath $path -Thumbprint $thumb } 'H9: UNC/device/stream refused before access' 'local drive|UNC'
     }
@@ -131,9 +132,23 @@ try {
     Assert-Throws { & "$scripts/Confirm-Sign.ps1" -FilePath $app -Thumbprint $thumb -ExpectedSHA256 $hashBefore -ApprovePlan $planHash -SignToolPath $fakeTool } 'R2: confirmation tool override removed' 'parameter'
     $tool = & "$scripts/Find-SignTool.ps1"
     Assert-True ([IO.Path]::IsPathRooted($tool)) 'real Microsoft-signed SDK SignTool found'
-    . "$PSScriptRoot/Discovery-Signing-Tests.ps1"
-    . "$PSScriptRoot/Install-Publisher-Tests.ps1"
-    . "$PSScriptRoot/Launcher-Display-Tests.ps1"
+    if ($NonDesktop) {
+        Write-Output 'SKIP: SecondRound visible Console section (4 checks; NonDesktop)'
+        . "$PSScriptRoot/SecondRound-Tests.ps1" -Only NonDesktop
+    }
+    else { . "$PSScriptRoot/SecondRound-Tests.ps1" }
+    $passed += $srPassed
+    . "$PSScriptRoot/ConPTY-Tests.ps1"
+    $passed += $ptyPassed
+    . "$PSScriptRoot/Session-Tests.ps1"
+    . "$PSScriptRoot/SecurityReview-Tests.ps1"
+    . "$PSScriptRoot/ReReview-Tests.ps1"
+    . "$PSScriptRoot/LastReview-Tests.ps1"
+    . "$PSScriptRoot/FinalFour-Tests.ps1"
+    $layoutChecks = @(& "$PSScriptRoot/Content-Layouts.ps1")
+    $layoutChecks | Write-Output
+    $passed += $layoutChecks.Count
+    . "$PSScriptRoot/ThirdRound-Tests.ps1"
     $signature = Get-AuthenticodeSignature -LiteralPath $app
     Assert-True ($signature.SignerCertificate.Thumbprint -eq $thumb) 'embedded signer is exactly throwaway certificate'
     Assert-True ($null -eq $signature.TimeStamperCertificate) 'offline test has no timestamp as expected'
@@ -142,6 +157,7 @@ try {
     Assert-True ((Get-AuthenticodeSignature -LiteralPath $app).Status -eq 'HashMismatch') 'changing signed bytes detected as HashMismatch'
 } catch {
     $suiteExitCode = 1
+    Write-Output $_.ScriptStackTrace
     Write-Error $_ -ErrorAction Continue
 } finally {
     try { Remove-DisposableSigningCertificate $certificate }

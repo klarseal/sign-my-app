@@ -1,0 +1,6 @@
+{
+  "name": "klarseal",
+  "metadata": { "description": "Local Windows app signing skill and MCP" },
+  "owner": { "name": "Klarseal", "email": "github@klarseal.com" },
+  "plugins": [{ "name": "sign-my-app", "source": "./", "description": "Local Windows signing skill and MCP", "version": "1.1.0" }]
+}

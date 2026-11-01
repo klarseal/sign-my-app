@@ -86,7 +86,8 @@ function Get-SigningCertificate { param($Thumbprint, [switch]$MachineStore); Get
 function Get-ReplacedSigningPublisher { param($Path, $Thumbprint); Get-DisplayTestCertificate }
 function Get-AuthenticodeSignature { param($LiteralPath); [pscustomobject]@{ SignerCertificate = (Get-DisplayTestCertificate); TimeStamperCertificate = (Get-DisplayTestCertificate); Status = 'Valid' } }
 function Get-ChildItem { param($Path, [switch]$CodeSigningCert); if ($Path -like 'Cert:*' -and $CodeSigningCert) { Get-DisplayTestCertificate } else { throw 'Unexpected enumeration.' } }
-function Read-Host { param($Prompt); throw 'DISPLAY TEST STOP' }
+function Assert-SigningConsole {}
+function Read-SigningConfirmation { param($Prompt); throw 'DISPLAY TEST STOP' }
 '@
 [IO.File]::WriteAllText((Join-Path $displayFixture 'Signing-Safety.ps1'), $displaySafety)
 $displayPreview = @(& "$displayFixture/Invoke-Sign.ps1" -FilePath $app -Thumbprint $thumb)
@@ -123,7 +124,8 @@ Assert-True ($nativeDisplay.Count -eq 1 -and $nativeDisplay[0] -ceq (ConvertTo-S
 
 $releaseVersion = (Get-Content -Raw -LiteralPath (Join-Path $repo 'VERSION')).Trim()
 $readme = Get-Content -Raw -LiteralPath (Join-Path $repo 'README.md')
-$installTags = [regex]::Matches($readme, "git -c advice.detachedHead=false clone --branch '([^']+)' --depth 1")
+$installInstructions = Get-Content -Raw -LiteralPath (Join-Path $repo 'mcp/INSTALL-FOR-AGENTS.md')
+$installTags = [regex]::Matches($installInstructions, "git -c advice.detachedHead=false clone --branch '([^']+)' --depth 1")
 Assert-True ($releaseVersion -cmatch '^v\d+\.\d+\.\d+$' -and $installTags.Count -gt 0 -and
     @($installTags | Where-Object { $_.Groups[1].Value -cne $releaseVersion }).Count -eq 0 -and
     $readme.Contains('git tag ((Get-Content -LiteralPath .\VERSION -Raw).Trim())')) 'F3: README install tag matches VERSION used by the release command'

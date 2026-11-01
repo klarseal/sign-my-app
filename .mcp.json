@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "klarseal": { "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/plugin-server.mjs"] }
+  }
+}

@@ -1,5 +1,29 @@
 # Signing workflow
 
+Manual confirmation uses managed Windows PowerShell console APIs and works in
+classic consoles and ConPTY terminals. Redirected input/output, -NonInteractive
+and missing consoles refuse. It cannot check window visibility. PE checks use
+managed content hashing and CMS; MSI lacks independent pre/post SIP content
+comparison. Silent session preflight is unavailable; key access is checked by the
+approved signing operation. See [session handling](session-errors.md).
+
+For installation, follow [the agent installer](../mcp/INSTALL-FOR-AGENTS.md).
+The plugin contains both this workflow and the MCP. With MCP, use `sign_files`:
+the person chooses Cancel (default), Sign once, or Always for this project.
+The client separately authorises the tool; our form approves its computed plan.
+Always trusts exact canonical output folders, certificate/store and timestamp
+service while the certificate session is open. It is opt-in. Revoke through
+`forget_project_trust`; no approval is needed. Never edit trust files or answer
+forms for the person. If asked to add build signing, show `get_build_recipe`'s
+exact `sign.ps1` and add it only as requested; it uses this same policy.
+Keep its generated launch command with `-NoProfile -ExecutionPolicy Bypass -File`
+in the build step so it works under Windows' default script policy. This applies
+only to that process; never ask for a machine or user execution policy change.
+If the session looks closed, ask the person to log in to SimplySign Desktop
+privately, then ask to sign again.
+Keep the selected files and publisher and continue on their return. The same
+unchanged one-time plan can resume for ten minutes; changes need fresh review.
+
 Use plain words and explain the next action. This skill is free to use, needs no
 skill account, and works with any code signing certificate that Windows SignTool
 can access. It is local instructions and PowerShell helpers, with no telemetry or
@@ -124,7 +148,67 @@ token unlock or authentication, use the same human handoff. Never ask for, read,
 store or log a password, code, token, or private key. Do not export keys, request a
 PFX, scrape credential stores, or infer that unattended cloud signing is supported.
 
-## 4. Preview, then hand the signing command to the person
+## 4. Sign in this conversation with the MCP
+
+When the installed local MCP is available, use `sign_files` with the exact owned
+built files and the person's selected certificate thumbprint. It uses the existing
+preview and signing safety helpers, SHA-256 and an RFC 3161 timestamp, then checks
+the signature. Give the network notice in section 5 before calling it.
+
+The MCP shows each file, SHA-256, publisher, thumbprint and timestamp service in a
+form in this conversation. **Only you can approve; never set up automatic answers
+to this prompt.** Choose Sign once or explicitly Always for this project only after reviewing it. Cancel is the default.
+The model must never answer the form, forge a client response or arrange a hook
+to answer it. Approval expires after five minutes and can be used once for that
+exact plan. Changed files require a fresh review. Signing runs one operation at a
+time; it does not replace another publisher's signature.
+
+If the client has no form support or reports it cannot display the form, a standard
+Windows dialog asks you instead. Cancel is its default and Sign is enabled after
+two seconds. If neither interface can show a question to you, signing refuses.
+A timeout, decline, cancellation or malformed answer never grants permission.
+An unanswered window is not a decline and does not start a decline pause. For an
+approval timeout, tell the person: "The Sign window got no answer, so nothing was
+signed. Ask me to try again when you're ready." Do not add partial-signature or
+expired-session advice when no signing step ran. Do not retry automatically.
+No PowerShell command or typed hash is needed for the MCP flow.
+
+If sign_files returns sessionRequired, say: "The certificate session looks closed.
+Please log in to SimplySign Desktop, then ask to sign again."
+Never watch or automate login. Keep the file and publisher selection. Continue when
+they return; an unchanged one-time plan can resume for ten minutes in this session.
+Never retry signing automatically. Always trust remains saved. The signing call
+waits up to 60 seconds for provider UI before returning the same session message;
+its private snapshot is discarded and the current original stays unchanged.
+Earlier completed files in a batch remain signed. See the exact
+[codes and message patterns](session-errors.md).
+
+This review protects against accidental signing and an assistant following bad
+instructions in project files. It cannot prove a person answered: client hooks can
+send the same answers, and auto-allow or bypass modes reduce protection. The server
+refuses detectable automatic/bypass environment or metadata signals. MCP does not
+reliably report client permission modes or hook configuration, so others cannot be
+detected. Never use automatic answers or bypass mode for signing. Only key-provider
+approval protects against malicious code already running under your Windows account.
+Open SimplySign only while signing and close the session afterwards.
+
+The local `%LOCALAPPDATA%\Klarseal\SignMyApp\signing-audit.jsonl` records attempts, signing and refusals with time,
+file, hash, publisher and approval path. It contains no credentials and is not a
+tamper-proof security log. Inspect partial failures before retrying: an error can
+leave a signed file without a usable timestamp. Report publisher, verbose timestamp
+evidence and actual verification status; do not claim a release passed when it did not.
+
+See [MCP setup, client results and limits](../mcp/README.md). The current protocol is
+[2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr),
+which carries elicitation in `input_required` results; earlier clients use a nested
+`elicitation/create` request. [Claude documents form dialogs and automatic hooks](https://code.claude.com/docs/en/mcp#respond-to-mcp-elicitation-requests).
+
+### Without MCP: preview, then hand the signing command to the person
+
+The following printed PowerShell workflow remains available for people without MCP.
+Its terminal confirmation rules apply to this manual path.
+
+
 
 Using the installed skill's absolute helper path, prepare the exact file and the
 thumbprint the person chose:
@@ -155,17 +239,31 @@ Confirm-Sign.ps1 command yourself in Windows PowerShell outside this agent, and
 type SIGN followed by the full displayed plan hash at its prompt. I must not run
 the signing command or type the confirmation for you."
 
-The final command belongs to the person. Never execute `Confirm-Sign.ps1`, invoke
+In this manual path, the final command belongs to the person. Never execute `Confirm-Sign.ps1`, invoke
 SignTool signing directly, add a bypass, or treat a prose approval as permission
 for the agent to sign. Agents must not run the approval command or type its
-confirmation. The signing function itself requires a plan and typed `SIGN <plan
-hash>` confirmation, including on direct calls. Its plan hash binds the local file
+confirmation. Manual signing calls require a plan and typed `SIGN <plan
+hash>` confirmation. The installed MCP bridge uses an internal approval callback
+after the person answers its form or native window; no tool argument skips it. Its plan hash binds the local file
 path, file SHA-256, tool, certificate thumbprint/store and timestamp URL; it checks
 again after the person reads the prompt.
 
 Typing is a check against mistakes and a misled agent following this skill.
-A script under the same account can pipe `SIGN <plan hash>` into the command;
-typing does not prove a person is present. Absolute installed helper paths keep
+The managed guard checks Console.IsInputRedirected, Console.IsOutputRedirected,
+Environment.UserInteractive, the -NonInteractive process switch, and ConsoleHost
+RawUI. Both confirmations use Host.UI.ReadLine, which reads ConsoleHost's terminal
+rather than Console.SetIn. Use Windows PowerShell in a classic console or a ConPTY
+terminal, including Windows Terminal and the Claude desktop app's terminal.
+Hidden classic windows are no longer distinguishable from visible ones. No
+window-class check is made, so a hidden PseudoConsoleWindow is accepted.
+Console refusals print the explanation to the terminal as well as raising an error.
+Code running under the same account, and pseudo-console typing, can still act
+as the person. This check does not prove human presence or stop modified helpers.
+A shell-controlling agent could already drive an accepted ConPTY or invoke
+SignTool under that account. Accepting hidden classic consoles makes automation
+easier but grants no new key access or signing authority. The skill still forbids
+agents from answering or running the manual confirmation.
+Absolute installed helper paths keep
 the app repository from choosing what runs. Process ancestry and agent denylists cannot
 establish a human presence and are not used as approval checks. It cannot protect
 against malicious code already running under the person's own account. Only
@@ -214,6 +312,16 @@ Do not assume cloud login fixes every case, ask the user to buy a replacement
 before diagnosis, or change trust settings to make a real release pass.
 
 ## 5. Verify and explain
+
+Windows may contact addresses in the file's certificate (AIA, CRL and OCSP),
+including local or private addresses, when inspecting an existing signature
+during preview or approval, as well as during verification. Tell the person
+before running these checks. Only check files they trust to trigger these
+requests. Helpers print the notice before checking the file. MCP emits a warning
+notification before starting the prepare/verify helper, because the bridge's
+final result arrives after its checks. Clients control how notifications appear;
+agents must also give the advance notice in conversation. Normal Windows chain
+and revocation checking remains enabled.
 
 Run the guide's verification for each signed payload and installer:
 

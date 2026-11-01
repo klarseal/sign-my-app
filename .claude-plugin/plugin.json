@@ -1,0 +1,8 @@
+{
+  "name": "sign-my-app",
+  "version": "1.1.0",
+  "description": "Sign built Windows apps through Klarseal's local MCP and signing skill.",
+  "author": { "name": "Klarseal", "email": "github@klarseal.com" },
+  "repository": "https://github.com/klarseal/sign-my-app",
+  "license": "MIT"
+}
